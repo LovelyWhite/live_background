@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OBS 直播背景 · iOS 26 玻璃拟态</title>
+
+<!--
+  ══════════════════════════════════════════════════════════════
+  OBS 使用说明
+  · 浏览器源 → 勾选「本地文件」加载本页，宽 1920 × 高 1080
+  · 画布写死 1920×1080；浏览器里预览会自动等比缩放适配窗口，
+    OBS 源尺寸正好 1920×1080 时缩放倍率为 1，不影响叠加
+  · 页面背景透明，OBS 浏览器源原生支持 Alpha 通道，无需抠像
+  · 直播画面区域为纯绿幕（#00FF00）：给该浏览器源添加「色度键」
+    滤镜抠掉绿色 → 此区域变透明，把视频源拖到本源下层即可显示
+  · 兼容性：刻意未使用 backdrop-filter / will-change / 透明度闪烁
+    动画，这些特性会导致 OBS 透明浏览器源闪烁
+  · 若 OBS 中仍显示旧样式（如深色界面）：浏览器源属性 →
+    点击「刷新当前页缓存」即可加载最新页面
+  · 浏览器内预览可加参数 ?bg 显示演示底色（OBS 中不要带）
+  · 歌单在 playlist.js 中维护，编辑保存后刷新浏览器源即可
+    · 全局配置 CONFIG（脚本开头）：showPlaylist 控制歌单显隐，showLyrics 控制底部歌词预留位
+    · 弹幕区为纯背景面板，自行将弹幕源叠加在本浏览器源上层即可
+    ══════════════════════════════════════════════════════════════
+-->
+
+<!-- Tailwind CSS（浏览器源需可访问外网以加载 CDN） -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  /* Tailwind 配置：无衬线纤细系统字体栈 */
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['ui-sans-serif', '-apple-system', 'SF Pro Display', 'SF Pro Text',
+                 'Helvetica Neue', 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei UI', 'sans-serif'],
+        },
+      },
+    },
+  };
+</script>
+
+<style>
+  /* ══════════ 全局：页面透明，供 OBS 抠取 ══════════ */
+  html, body {
+    background: transparent; overflow: hidden; overscroll-behavior: none;
+    /* 全局字体：得意黑（Smiley Sans，本机已安装，仅 Regular 一个字重） */
+    font-family: "得意黑", "Smiley Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+
+  /* 浏览器预览演示底色（仅 ?bg 参数时生效） */
+  html.preview-bg body {
+    background:
+      radial-gradient(1100px 760px at 12% 18%, rgba(94, 114, 235, .22), transparent 62%),
+      radial-gradient(960px 680px at 88% 84%, rgba(56, 189, 248, .14), transparent 62%),
+      linear-gradient(135deg, #171b26 0%, #232941 55%, #1a2030 100%) !important;
+  }
+
+  /* 1920×1080 固定舞台：OBS 下 scale=1，浏览器预览时由 JS 等比缩放适配窗口 */
+  #stage {
+    position: fixed; left: 50%; top: 50%; z-index: 1;
+    width: 1920px; height: 1080px;
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  /* 背景视频：与舞台同尺寸同缩放，铺满画布，不响应鼠标 */
+  #bg-video {
+    position: fixed; left: 50%; top: 50%; z-index: 0;
+    width: 1920px; height: 1080px; object-fit: cover;
+    transform: translate(-50%, -50%) scale(1);
+    pointer-events: none;
+  }
+
+  /* ══════════ 主题变量（低饱和靛蓝主色 × 双主题） ══════════ */
+  :root {
+    --accent: rgba(104, 120, 226, .92);
+    --accent-soft: rgba(104, 120, 226, .12);
+
+    /* 玻璃：半透明白 + 低饱和细边框 + 柔光投影 + 内高光（绿幕区除外保持不透明） */
+    --glass-bg: linear-gradient(168deg, rgba(255, 255, 255, .74), rgba(255, 255, 255, .55));
+    --glass-border: rgba(255, 255, 255, .95);
+    --glass-sheen: linear-gradient(90deg, transparent, rgba(255, 255, 255, 1), transparent);
+    --glass-shadow: 0 0 0 1px rgba(120, 134, 170, .22),
+                    0 20px 50px -12px rgba(30, 41, 80, .24),
+                    0 2px 10px rgba(30, 41, 80, .08);
+    --glass-inset: inset 0 1.5px 0 rgba(255, 255, 255, 1), inset 0 -1px 0 rgba(255, 255, 255, .45);
+  }
+
+  /* ══════════ iOS 26 玻璃面板（不用 backdrop-filter，避免 OBS 闪烁） ══════════ */
+  .glass {
+    position: relative;
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow), var(--glass-inset);
+    border-radius: 12px;
+  }
+  /* 顶缘高光细线，玻璃通透感的关键一笔 */
+  .glass::before {
+    content: ''; position: absolute; left: 28px; right: 28px; top: 0;
+    height: 1px; background: var(--glass-sheen); opacity: .85; pointer-events: none;
+  }
+  /* 公告块边框弱化：白边不那么明显（仅覆盖公告块，不影响其他面板） */
+  #notice-wrap {
+    --glass-border: rgba(255, 255, 255, .45);
+    --glass-shadow: 0 0 0 1px rgba(120, 134, 170, .12),
+                    0 20px 50px -12px rgba(30, 41, 80, .18),
+                    0 2px 10px rgba(30, 41, 80, .05);
+  }
+
+  /* 公告文字：白色字体 + 玫瑰粉描边 + 柔光投影（提升与浅玻璃底的分离度，弱化刺眼感） */
+  .notice-text {
+    color: rgba(255, 255, 255, .95);
+    -webkit-text-stroke: 2.2px rgba(226, 86, 148, .92);
+            paint-order: stroke fill; /* 先画描边再填充，笔画不被描边吃掉 */
+    text-shadow: 0 2px 14px rgba(226, 86, 148, .40), 0 1px 3px rgba(180, 55, 115, .30);
+  }
+  .notice-text i {
+    font-style: normal; color: rgba(255, 255, 255, .92); margin: 0 .3em; font-size: .8em;
+  }
+
+  /* ══════════ 歌单：向上无缝滚动（内容复制一份，位移 -50% 循环） ══════════ */
+  .roll-track {
+    animation: roll-up var(--roll-duration, 28s) linear infinite;
+  }
+  @keyframes roll-up { to { transform: translateY(-50%); } }
+
+  /* 歌曲行：多段自适应网格 + 细分隔线；歌名按序号轮转柔和彩色 */
+  .song {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 1px;
+    border-bottom: 1px solid rgba(148, 163, 184, .20);
+  }
+  .song p { color: var(--song-color, #334155); }
+  .s-idx {
+    color: var(--song-color, var(--accent)); opacity: .55;
+    font-weight: 300; font-variant-numeric: tabular-nums;
+  }
+
+  /* ══════════ 公告：横向无缝滚动（两端渐隐用遮罩实现） ══════════ */
+  .marquee-track {
+    display: flex; width: max-content;
+    animation: marquee var(--marquee-duration, 34s) linear infinite;
+  }
+  @keyframes marquee { to { transform: translateX(-50%); } }
+  .marquee-mask {
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+            mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+  }
+
+  /* 歌单纵向渐隐遮罩（主题无关，免去叠色块） */
+  .fade-y {
+    -webkit-mask-image: linear-gradient(180deg, transparent, #000 34px, #000 calc(100% - 34px), transparent);
+            mask-image: linear-gradient(180deg, transparent, #000 34px, #000 calc(100% - 34px), transparent);
+  }
+  /* 弹幕仅顶部渐隐，避免内容被生硬裁切 */
+  .fade-top {
+    -webkit-mask-image: linear-gradient(180deg, transparent, #000 30px);
+            mask-image: linear-gradient(180deg, transparent, #000 30px);
+  }
+</style>
+</head>
+
+<body class="text-slate-800 antialiased select-none">
+
+  <!-- ══════════ 背景视频：循环播放，铺满画布，位于所有内容之下（OBS 无需额外图层） ══════════ -->
+  <video id="bg-video" src="background_video.mp4" autoplay muted loop playsinline></video>
+
+  <!-- ══════════ 1920×1080 固定舞台（OBS 画布 1:1） ══════════ -->
+  <div id="stage" class="flex flex-col p-5 pt-2 gap-3">
+
+      <!-- ── 顶栏（紧凑）：直播标识（左） + 日期与时钟（右） ── -->
+      <header class="relative h-12 shrink-0 -mb-1 flex items-center justify-between">
+        <!-- 直播标识胶囊（静态红点：透明度闪烁动画会引发 OBS 闪烁，故不使用） -->
+        <div class="glass !rounded-full h-10 px-5 flex items-center gap-3">
+          <span class="w-2.5 h-2.5 rounded-full bg-rose-400"
+                style="box-shadow: 0 0 8px rgba(251, 113, 133, .6);"></span>
+          <span class="text-[17px] font-normal tracking-[0.3em]">LIVE</span>
+          <span class="w-px h-4 bg-current opacity-15"></span>
+          <span class="text-[17px] tracking-[0.25em] opacity-70">直播中</span>
+          <!-- 当前游戏（CONFIG.currentGame 控制文案，留空则整段隐藏） -->
+          <span id="game-wrap" class="flex items-center gap-3">
+            <span class="w-px h-4 bg-current opacity-15"></span>
+            <span id="current-game" class="text-[17px] tracking-[0.2em] text-slate-900"></span>
+          </span>
+        </div>
+
+        <!-- 右侧：日期星期 + 实时数字时钟（时:分 大号纤细 + 秒数小号置灰） -->
+        <div class="flex items-center gap-4">
+          <div class="text-right leading-tight text-slate-600">
+            <p id="date-md" class="text-[16px] tabular-nums text-slate-800">--月--日</p>
+            <p id="date-wk" class="text-[14px] tracking-[0.25em] mt-0.5">星期-</p>
+          </div>
+          <div class="flex items-baseline gap-1 tabular-nums font-thin leading-none tracking-[0.06em] text-slate-900">
+            <span id="clock-hm" class="text-[60px]">--:--</span>
+            <span id="clock-ss" class="text-[32px] opacity-55">:--</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ── 主区域：左侧直播画面 + 右侧歌单/弹幕 ── -->
+      <main class="flex-1 min-h-0 flex gap-3">
+
+      <!-- 左：直播画面容器（玻璃外框与绿幕区占满左侧主区，便于放置任意比例视频源） -->
+      <section class="relative flex-1 min-w-0">
+        <div id="video-frame" class="glass w-full h-full p-2.5 overflow-hidden">
+
+          <!-- 绿幕区：纯绿铺满，OBS 色度键抠掉后此区域透明，视频源放本源下层即可 -->
+          <div id="video-screen" class="relative w-full h-full rounded-[8px] overflow-hidden"
+               style="background: #00ff00;"></div>
+        </div>
+      </section>
+
+      <!-- 右：歌单（上） + 弹幕（下），固定高度铺满主区 -->
+      <aside id="right-aside" class="w-[323px] shrink-0 flex flex-col gap-3 min-h-0">
+
+        <!-- 滚动歌单（CONFIG.showPlaylist 控制显隐，关闭后右侧全部为弹幕区） -->
+        <section id="song-panel" class="glass h-[500px] shrink-0 flex flex-col overflow-hidden">
+          <div class="flex items-center justify-between px-6 pt-5 pb-2 shrink-0">
+            <div class="flex items-center gap-3">
+              <span class="w-1 h-[20px] rounded-full" style="background: var(--accent)"></span>
+              <h2 class="text-[20px] tracking-[0.3em] text-slate-700">歌单</h2>
+            </div>
+            <span id="song-meta" class="text-[13px] tracking-[0.22em] text-slate-400">共 8 首</span>
+          </div>
+          <div class="flex-1 min-h-0 relative overflow-hidden fade-y">
+            <div id="song-track" class="roll-track" style="--roll-duration: 16s">
+              <div id="song-list" class="px-4"></div>
+              <div aria-hidden="true" class="px-4"></div><!-- 复制一份内容实现无缝循环 -->
+            </div>
+          </div>
+        </section>
+
+        <!-- 弹幕区：仅提供玻璃背景，不填充内容（在 OBS 中把你的弹幕源叠加在本源上层即可） -->
+        <section id="danmaku-panel" class="glass flex-1 flex flex-col overflow-hidden">
+          <div class="flex items-center px-6 pt-5 pb-3 shrink-0">
+            <div class="flex items-center gap-3">
+              <span class="w-1 h-[20px] rounded-full" style="background: var(--accent)"></span>
+              <h2 class="text-[20px] tracking-[0.3em] text-slate-700">弹幕</h2>
+            </div>
+          </div>
+          <div class="flex-1 min-h-0 relative overflow-hidden fade-top">
+            <!-- 空容器：预留给后续自行接入的弹幕内容 -->
+            <div id="dm-list" class="absolute inset-x-0 bottom-0 flex flex-col gap-3 px-5 pb-4"></div>
+          </div>
+        </section>
+      </aside>
+    </main>
+
+    <!-- ── 底部通栏：歌词预留块 + 公告块（两个独立玻璃面板，宽度 1.3:3，歌词块可全局配置关闭） ── -->
+    <footer id="footer" class="h-[90px] shrink-0 flex gap-3">
+      <!-- 歌词预留块：透明留空（占位保持布局比例，便于叠加自己的歌词源） -->
+      <div id="lyrics-slot" class="flex-[1.3] min-w-0"></div>
+      <!-- 公告块：独立玻璃面板（歌词块开启时占 3 份，关闭时占满整行）；渐隐遮罩放内层，避免淡化面板边框 -->
+      <div id="notice-wrap" class="glass flex-[3] min-w-0 flex items-center overflow-hidden">
+        <div class="marquee-mask flex-1 min-w-0 h-full flex items-center">
+          <div id="notice-track" class="marquee-track h-full items-center" style="--marquee-duration: 20s">
+          <span class="notice-text whitespace-nowrap pr-24 text-[34px] tracking-[0.12em]"></span>
+          <span aria-hidden="true" class="notice-text whitespace-nowrap pr-24 text-[34px] tracking-[0.12em]"></span>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+<script>
+/* ════════════════════════ 全局配置（按需修改） ════════════════════════ */
+const CONFIG = {
+  showPlaylist: true, // 右侧是否显示滚动歌单
+  showDanmaku: false,  // 右侧是否显示弹幕背景面板（歌单关闭时弹幕占满右栏，反之亦然）
+  showLyrics: true,   // 底部是否预留歌词位置（开启时与公告按 1.3:3 分配宽度）
+  currentGame: '鹅鸭杀', // 顶栏显示的当前游戏，留空 '' 则隐藏该段
+  noticeText: '欢迎来到西瓜大王ovo的直播间，野生程序员/青年音唱见，不定时直播唱歌/游戏，欢迎关注～', // 底部滚动公告
+};
+
+/* 应用面板显隐配置 */
+if (!CONFIG.showPlaylist) document.getElementById('song-panel').style.display = 'none';
+if (!CONFIG.showDanmaku) {
+  document.getElementById('danmaku-panel').style.display = 'none';
+  document.getElementById('song-panel').style.height = '100%'; // 弹幕关闭时歌单占满右栏
+}
+if (!CONFIG.showPlaylist && !CONFIG.showDanmaku) {
+  document.getElementById('right-aside').style.display = 'none'; // 两者都关时右栏整体隐藏，左侧画面占满
+}
+if (CONFIG.currentGame) {
+  document.getElementById('current-game').textContent = CONFIG.currentGame;
+} else {
+  document.getElementById('game-wrap').style.display = 'none';
+}
+/* 填充滚动公告（两份内容拼接实现无缝循环） */
+document.querySelectorAll('#notice-track .notice-text').forEach(el => {
+  el.textContent = CONFIG.noticeText;
+});
+if (!CONFIG.showLyrics) {
+  document.getElementById('lyrics-slot').style.display = 'none';
+  document.getElementById('notice-wrap').style.flex = '1';
+  document.getElementById('footer').style.height = '80px'; // 仅公告时底栏收窄
+}
+
+/* ════════════════════════ 舞台等比缩放（仅影响浏览器预览） ════════════════════════
+   OBS 浏览器源尺寸恰为 1920×1080 时 scale=1，画面保持 1:1 不受影响 */
+const stage = document.getElementById('stage');
+const bgVideo = document.getElementById('bg-video');
+function fitStage() {
+  const s = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+  stage.style.transform = `translate(-50%, -50%) scale(${s})`;
+  bgVideo.style.transform = `translate(-50%, -50%) scale(${s})`; // 背景视频与舞台同步缩放
+}
+fitStage();
+window.addEventListener('resize', fitStage);
+
+/* 浏览器预览演示底色：地址带 ?bg 时生效（OBS 中不要携带） */
+const rootEl = document.documentElement;
+if (new URLSearchParams(location.search).has('bg')) rootEl.classList.add('preview-bg');
+
+/* ════════════════════════ 实时日期与时钟 ════════════════════════ */
+const clockHm = document.getElementById('clock-hm');
+const clockSs = document.getElementById('clock-ss');
+const dateMd = document.getElementById('date-md');
+const dateWk = document.getElementById('date-wk');
+const WEEK_CN = ['日', '一', '二', '三', '四', '五', '六'];
+const pad2 = n => String(n).padStart(2, '0');
+
+function tickClock() {
+  const d = new Date();
+  clockHm.textContent = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  clockSs.textContent = `:${pad2(d.getSeconds())}`;
+  dateMd.textContent = `${d.getMonth() + 1}月${d.getDate()}日`;
+  dateWk.textContent = `星期${WEEK_CN[d.getDay()]}`;
+}
+tickClock();
+setInterval(tickClock, 1000);
+
+/* ════════════════════════ 弹幕区（纯背景） ════════════════════════
+   该面板仅提供玻璃质感背景，不填充任何内容；
+   在 OBS 中将你自己的弹幕源置于本浏览器源上层即可覆盖显示。 */
+</script>
+
+<!-- 歌单独立文件：编辑 playlist.js 即可更新滚动歌单 -->
+<script src="playlist.js"></script>
+</body>
+</html>
